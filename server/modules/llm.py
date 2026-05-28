@@ -44,5 +44,5 @@ Answer:
         chain_type="stuff",
         retriever=retriever,
         chain_type_kwargs={"prompt": prompt},
-        return_source_documents=False,
+        return_source_documents=True,
     )
