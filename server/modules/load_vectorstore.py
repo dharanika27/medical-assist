@@ -1,175 +1,108 @@
 import os
-import uuid
 import time
-
 from pathlib import Path
+
 from dotenv import load_dotenv
-
-from pinecone import Pinecone, ServerlessSpec
-
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pinecone import Pinecone, ServerlessSpec
+from tqdm.auto import tqdm
 
-load_dotenv()
+SERVER_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(SERVER_DIR / ".env")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "medicalindex")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2-preview")
+CLEAR_INDEX_ON_UPLOAD = os.getenv("CLEAR_INDEX_ON_UPLOAD", "true").lower() == "true"
 
-PINECONE_ENV = "us-east-1"
-PINECONE_INDEX_NAME = "medicalindex-v3"
+if GOOGLE_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+UPLOAD_DIR = SERVER_DIR / "uploaded_docs"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
-UPLOAD_DIR = "./uploaded_docs"
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+def get_pinecone_index():
+    pc = Pinecone(api_key=PINECONE_API_KEY)
+    spec = ServerlessSpec(cloud="aws", region=PINECONE_ENV)
+    existing_indexes = [i["name"] for i in pc.list_indexes()]
 
-# ---------------- PINECONE ---------------- #
+    if PINECONE_INDEX_NAME not in existing_indexes:
+        pc.create_index(
+            name=PINECONE_INDEX_NAME,
+            dimension=3072,
+            metric="cosine",
+            spec=spec,
+        )
+        while not pc.describe_index(PINECONE_INDEX_NAME).status["ready"]:
+            time.sleep(1)
 
-pc = Pinecone(api_key=PINECONE_API_KEY)
+    return pc.Index(PINECONE_INDEX_NAME)
 
-spec = ServerlessSpec(
-    cloud="aws",
-    region=PINECONE_ENV
-)
-
-existing_indexes = [
-    i["name"]
-    for i in pc.list_indexes()
-]
-
-if PINECONE_INDEX_NAME not in existing_indexes:
-
-    pc.create_index(
-        name=PINECONE_INDEX_NAME,
-        dimension=3072,
-        metric="dotproduct",
-        spec=spec
-    )
-
-    while not pc.describe_index(
-        PINECONE_INDEX_NAME
-    ).status["ready"]:
-
-        time.sleep(1)
-
-index = pc.Index(PINECONE_INDEX_NAME)
-
-# ---------------- VECTORSTORE ---------------- #
 
 def load_vectorstore(uploaded_files):
-
-    embed_model = GoogleGenerativeAIEmbeddings(
-        model="gemini-embedding-2-preview"
-    )
-
+    index = get_pinecone_index()
+    embed_model = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
     file_paths = []
 
-    # SAVE FILES
+    if CLEAR_INDEX_ON_UPLOAD:
+        print("🗑 Clearing old vectors from Pinecone...")
+        index.delete(delete_all=True)
+
+        while True:
+            stats = index.describe_index_stats()
+            remaining = stats.get("total_vector_count", 0)
+            print(f"Remaining vectors: {remaining}")
+            if remaining == 0:
+                break
+            time.sleep(2)
+
+        print("✅ Old vectors cleared successfully")
 
     for file in uploaded_files:
-
-        save_path = Path(UPLOAD_DIR) / file.filename
-
+        save_path = UPLOAD_DIR / file.filename
         with open(save_path, "wb") as f:
             f.write(file.file.read())
-
         file_paths.append(str(save_path))
 
-    # PROCESS FILES
-
     for file_path in file_paths:
-
         loader = PyPDFLoader(file_path)
-
         documents = loader.load()
 
-        splitter = RecursiveCharacterTextSplitter(
-            separators=["\n\n", "\n", ".", " "],
-            chunk_size=3000,
-            chunk_overlap=500
-        )
-
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_documents(documents)
 
-        # REMOVE EMPTY CHUNKS
-
-        valid_chunks = [
-            chunk
-            for chunk in chunks
-            if chunk.page_content.strip()
-        ]
-
-        texts = [
-            chunk.page_content
-            for chunk in valid_chunks
-        ]
-
+        chunks = [chunk for chunk in chunks if chunk.page_content.strip()]
+        texts = [chunk.page_content for chunk in chunks]
         metadatas = [
             {
                 **chunk.metadata,
-                "text": chunk.page_content
+                "text": chunk.page_content,
+                "source": Path(file_path).name,
             }
-            for chunk in valid_chunks
+            for chunk in chunks
         ]
+        ids = [f"{Path(file_path).stem}-{i}" for i in range(len(chunks))]
 
-        ids = [
-            f"{Path(file_path).stem}-{i}-{uuid.uuid4()}"
-            for i in range(len(valid_chunks))
-        ]
+        print(f"🔍 Embedding {len(texts)} chunks with {EMBEDDING_MODEL}...")
+        embeddings = []
+        with tqdm(total=len(texts), desc="Embedding chunks") as progress:
+            for text in texts:
+                embeddings.append(embed_model.embed_documents([text])[0])
+                progress.update(1)
 
-        print(f"🔍 Embedding {len(texts)} chunks...")
+        if len(embeddings) != len(texts):
+            raise ValueError(
+                f"Embedding count mismatch: got {len(embeddings)} embeddings for {len(texts)} chunks"
+            )
 
-        embeddings = embed_model.embed_documents(texts)
-
-        # CLEAR OLD DATA
-        print("🗑 Clearing old vectors from Pinecone...")
-
-        try:
-            stats = index.describe_index_stats()
-
-            total_vectors = stats.get("total_vector_count", 0)
-
-            if total_vectors > 0:
-
-                index.delete(delete_all=True)
-
-                # wait until deletion completes
-                while True:
-
-                    stats = index.describe_index_stats()
-
-                    remaining = stats.get("total_vector_count", 0)
-
-                    print(f"Remaining vectors: {remaining}")
-
-                    if remaining == 0:
-                        break
-
-                    time.sleep(2)
-
-                print("✅ Old vectors cleared successfully")
-
-            else:
-                print("ℹ️ No existing vectors found")
-
-        except Exception as e:
-
-            print(f"⚠️ Skipping delete step: {e}")
-
-        vectors = []
-
-        for id_, embedding, metadata in zip(ids, embeddings, metadatas):
-
-            vectors.append({
-                "id": id_,
-                "values": embedding,
-                "metadata": metadata
-            })
-
-        print("📤 Uploading to Pinecone...")
-
-        index.upsert(vectors=vectors)
+        print(f"📤 Uploading {len(embeddings)} vectors to Pinecone index '{PINECONE_INDEX_NAME}'...")
+        with tqdm(total=len(embeddings), desc="Upserting to Pinecone") as progress:
+            index.upsert(vectors=list(zip(ids, embeddings, metadatas)))
+            progress.update(len(embeddings))
 
         print(f"✅ Upload complete for {file_path}")

@@ -1,27 +1,42 @@
-from langchain_core.prompts import PromptTemplate
-from langchain_classic.chains import RetrievalQA
-from langchain_groq import ChatGroq
 import os
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+from dotenv import load_dotenv
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_groq import ChatGroq
+
+SERVER_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(SERVER_DIR / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+
+def format_docs(docs):
+    return "\n\n".join(
+        doc.page_content
+        for doc in docs
+    )
 
 
 def get_llm_chain(retriever):
-
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY,
-        model_name="llama-3.3-70b-versatile",
+        model_name=GROQ_MODEL,
+        temperature=0,
     )
 
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template="""
-You are MediBot, an AI-powered assistant trained to help users understand medical documents and health-related questions.
+You are MediBot, an AI-powered assistant trained to help users understand uploaded medical documents.
 
-Your job is to provide clear, accurate, and helpful responses based only on the provided context.
+Answer using only the provided PDF context. Do not use outside medical knowledge, even if you know the answer.
+A retrieved chunk being present does not mean the question is answered by the PDF.
+If the PDF context does not answer the question, say exactly:
+"I'm sorry, but I couldn't find relevant information in the provided documents."
 
 Context:
 {context}
@@ -30,19 +45,20 @@ User Question:
 {question}
 
 Answer:
-- Respond in a calm, factual, and respectful tone.
-- Use simple explanations when needed.
-- If the context does not contain the answer, say:
-  "I'm sorry, but I couldn't find relevant information in the provided documents."
-- Do NOT make up facts.
-- Do NOT give medical advice or diagnoses.
-"""
+- Answer naturally and directly when the answer is present.
+- Include only facts stated in the context.
+- Do not mention source files, page numbers, scores, or citations in the answer.
+- Do not add extra explanation, prevention tips, treatment advice, or general medical knowledge.
+""",
     )
 
-    return RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True,
+    chain = (
+        {
+            "context": retriever | RunnableLambda(format_docs),
+            "question": RunnablePassthrough(),
+        }
+        | prompt
+        | llm
+        | StrOutputParser()
     )
+    return chain
