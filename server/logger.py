@@ -1,14 +1,14 @@
 import logging
 
+
 def setup_logger(name="MedicalAssistant"):
-    logger=logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
 
-    ch=logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
 
-
-    formatter=logging.Formatter("[%(asctime)s] [%(levelname)s] --- [%(message)s]")
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] --- [%(message)s]")
     ch.setFormatter(formatter)
 
     if not logger.hasHandlers():
@@ -17,10 +17,5 @@ def setup_logger(name="MedicalAssistant"):
     return logger
 
 
-
-logger=setup_logger()
-
-logger.info("RAG prcoess started")
-logger.debug("Bebugging")
-logger.error("Failed to load")
-logger.critical("Critical message")
+logger = setup_logger()
+logger.info("RAG process started")
