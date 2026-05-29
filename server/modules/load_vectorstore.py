@@ -51,17 +51,23 @@ def load_vectorstore(uploaded_files):
 
     if CLEAR_INDEX_ON_UPLOAD:
         print("🗑 Clearing old vectors from Pinecone...")
-        index.delete(delete_all=True)
+        try:
+            index.delete(delete_all=True)
 
-        while True:
-            stats = index.describe_index_stats()
-            remaining = stats.get("total_vector_count", 0)
-            print(f"Remaining vectors: {remaining}")
-            if remaining == 0:
-                break
-            time.sleep(2)
+            while True:
+                stats = index.describe_index_stats()
+                remaining = stats.get("total_vector_count", 0)
+                print(f"Remaining vectors: {remaining}")
+                if remaining == 0:
+                    break
+                time.sleep(2)
 
-        print("✅ Old vectors cleared successfully")
+            print("✅ Old vectors cleared successfully")
+        except Exception as e:
+            if "Namespace not found" in str(e):
+                print("ℹ️ No existing Pinecone namespace found. Skipping clear step.")
+            else:
+                raise
 
     for file in uploaded_files:
         save_path = UPLOAD_DIR / file.filename
